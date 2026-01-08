@@ -1,0 +1,19 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Node (if anyone extends this)
+node_modules/
+npm-debug.log
+
+# Test artifacts
+.claude/progress/
+
+# Archives
+*.zip

@@ -1,0 +1,11 @@
+{
+  "name": "repo-refresh",
+  "version": "1.0.0",
+  "description": "Continuous context preservation for Claude Code. Auto-logs progress during sessions and provides /repo-refresh command to fully recontextualize from where you left off. Makes Claude feel like he never went away.",
+  "author": {
+    "name": "Zach",
+    "email": ""
+  },
+  "keywords": ["context", "memory", "continuity", "refresh", "progress", "session"],
+  "license": "MIT"
+}
