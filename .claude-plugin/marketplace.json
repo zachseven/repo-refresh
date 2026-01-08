@@ -1,0 +1,15 @@
+{
+  "name": "local-plugins",
+  "description": "Local plugin marketplace",
+  "version": "1.0.0",
+  "owner": {
+    "name": "local",
+    "email": ""
+  },
+  "plugins": [
+    {
+      "name": "repo-refresh",
+      "source": "./repo-refresh"
+    }
+  ]
+}
