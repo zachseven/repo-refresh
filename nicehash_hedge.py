@@ -88,6 +88,11 @@ def main():
                    help=f"Pool fee percentage (default: {DEFAULT_POOL_FEE_PCT}%%)")
     p.add_argument("--bankroll", type=float, default=None,
                    help="Your total BTC bankroll in USD (used for Kelly sizing; optional)")
+    p.add_argument("--difficulty-change-pct", type=float, default=None,
+                   help="Projected % change at next difficulty adjustment (e.g. -3 for -3%%). "
+                        "Look up on mempool.space.")
+    p.add_argument("--days-to-adjustment", type=float, default=None,
+                   help="Days until next difficulty adjustment. Look up on mempool.space.")
     args = p.parse_args()
 
     # ---- core numbers ----
@@ -129,6 +134,73 @@ def main():
     print(f"  (For scale: a single new Antminer S21 does ~200 TH/s. Bitcoin's")
     print(f"   entire network is doing {args.network_hashrate:,.0f} EH/s right now, which is")
     print(f"   {network_th/th:,.0f}x more than what you're renting.)")
+
+    # ---- SMART TIMING CHECK ----
+    section("SMART TIMING CHECK — should you buy RIGHT NOW?")
+    # Compare what FPPS pays out (after pool fee) vs. what NiceHash is charging.
+    # If FPPS payout > NiceHash spot, the market is mispriced in YOUR favor.
+    pps_payout_net = args.pps_price * (1 - args.pool_fee_pct / 100)
+    nicehash_cost = args.nicehash_price
+    spread_btc = pps_payout_net - nicehash_cost
+    spread_pct = (spread_btc / nicehash_cost) * 100 if nicehash_cost > 0 else 0
+    print(f"  NiceHash is charging:  {nicehash_cost:.8f} BTC per TH per day")
+    print(f"  FPPS pool pays out:    {pps_payout_net:.8f} BTC per TH per day (after pool fee)")
+    print(f"  Spread:                {spread_pct:+.2f}%")
+    print()
+    if spread_pct >= 2.0:
+        print("  >>> GREEN LIGHT — RENT NOW <<<")
+        print(f"  FPPS is paying out MORE than NiceHash is charging. This is")
+        print(f"  pure arbitrage. Rent the hashrate, point it at an FPPS pool")
+        print(f"  (Foundry USA, AntPool, F2Pool, Luxor), pocket the spread.")
+        print(f"  Estimated guaranteed profit on your order: "
+              f"{fmt_usd(spread_btc * th * days * args.btc_price)}")
+        print(f"  These windows close in minutes when bots notice them. Move fast.")
+    elif spread_pct >= -3.0:
+        print("  >>> NEUTRAL — efficient market right now <<<")
+        print(f"  NiceHash is priced about where it should be. Renting will")
+        print(f"  cost you a small amount on average. Fine if you want to")
+        print(f"  play, but no edge here. Consider waiting and checking again")
+        print(f"  in a few hours — markets move.")
+    else:
+        print("  >>> RED LIGHT — OVERPRICED, WAIT <<<")
+        print(f"  NiceHash is charging meaningfully more than mining actually")
+        print(f"  pays out right now. Buyer demand probably spiked (someone's")
+        print(f"  attacking a small coin, or BTC just pumped and FOMO buyers")
+        print(f"  showed up). Wait a few hours and check again — or place a")
+        print(f"  limit order on the NiceHash order book about 3-5% below")
+        print(f"  spot and let it fill when the spike fades.")
+    print()
+    print("  HOW TO LOOK UP THESE NUMBERS:")
+    print("    NiceHash spot:  nicehash.com/marketplace -> SHA-256 'Standard'")
+    print("    FPPS payout:    foundryusapool.com / antpool.com / f2pool.com")
+    print("                    (look for 'PPS+' or 'FPPS' rate in BTC/TH/day)")
+
+    # ---- DIFFICULTY TIMING ----
+    if args.difficulty_change_pct is not None or args.days_to_adjustment is not None:
+        section("DIFFICULTY TIMING")
+        if args.difficulty_change_pct is not None:
+            d = args.difficulty_change_pct
+            print(f"  Next difficulty adjustment:  {d:+.2f}%")
+            if args.days_to_adjustment is not None:
+                print(f"  Time until adjustment:       {args.days_to_adjustment:.1f} days")
+            print()
+            if d <= -2.0:
+                print(f"  >>> FAVORABLE — difficulty is dropping by {abs(d):.1f}% <<<")
+                print(f"  After the adjustment, the same hashrate finds blocks faster,")
+                print(f"  so mining gets more profitable per TH. NiceHash sellers will")
+                print(f"  eventually re-price up to match — but there's usually a")
+                print(f"  6-24 hour lag. Rent just AFTER the adjustment at pre-adjustment")
+                print(f"  prices and you capture a few % free.")
+            elif d >= 2.0:
+                print(f"  >>> UNFAVORABLE — difficulty is rising by {d:.1f}% <<<")
+                print(f"  Mining is about to get harder. If you're going to rent,")
+                print(f"  rent BEFORE the adjustment and finish before it hits.")
+                print(f"  Or just wait — NiceHash prices will drop after.")
+            else:
+                print(f"  Small adjustment ({d:+.2f}%). Not a meaningful timing factor.")
+        elif args.days_to_adjustment is not None:
+            print(f"  Time until adjustment: {args.days_to_adjustment:.1f} days")
+            print(f"  (Pass --difficulty-change-pct to get a timing verdict.)")
 
     # ---- scenario A: steady pool ----
     section("OPTION A: Point it at a STEADY pool (PPS)")
