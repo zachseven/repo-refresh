@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html,body{margin:0;padding:0;background:#05070b;overflow:hidden}
+  #c{display:block}
+</style>
+</head>
+<body>
+<canvas id="c" width="1080" height="1920"></canvas>
+<script>
+const W=1080,H=1920;
+const cv=document.getElementById('c');
+const x=cv.getContext('2d');
+
+// ---------- palette ----------
+const COL={
+  bg0:'#05070b', bg1:'#0c1119',
+  blood:'#ff3344', bloodDk:'#9c1322', bloodGlow:'rgba(255,51,68,',
+  gold:'#f4c54b', goldDk:'#8a6d18',
+  oxy:'#48d6c8', oxyGlow:'rgba(72,214,200,',
+  white:'#f6f8fb', mute:'#8794a6', dim:'#4a5365'
+};
+
+// ---------- helpers ----------
+function clamp(a,b,v){return Math.max(a,Math.min(b,v));}
+function lerp(a,b,t){return a+(b-a)*t;}
+function smooth(t){t=clamp(0,1,t);return t*t*(3-2*t);}
+function easeOut(t){t=clamp(0,1,t);return 1-Math.pow(1-t,3);}
+function easeIn(t){t=clamp(0,1,t);return t*t*t;}
+// window-in-out fade alpha for a segment
+function seg(t,start,end,fIn,fOut){
+  if(t<start||t>end)return 0;
+  const a=smooth((t-start)/fIn);
+  const b=smooth((end-t)/fOut);
+  return Math.min(a,b);
+}
+// seeded prng
+function mulberry(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+const rnd=mulberry(20260625);
+// cubic bezier point
+function bez(p0,p1,p2,p3,t){
+  const u=1-t;
+  const a=u*u*u, b=3*u*u*t, c=3*u*t*t, d=t*t*t;
+  return {x:a*p0.x+b*p1.x+c*p2.x+d*p3.x, y:a*p0.y+b*p1.y+c*p2.y+d*p3.y};
+}
+
+function bg(t){
+  const g=x.createRadialGradient(W/2,H*0.42,80, W/2,H*0.42,H*0.8);
+  g.addColorStop(0,COL.bg1); g.addColorStop(1,COL.bg0);
+  x.fillStyle=g; x.fillRect(0,0,W,H);
+  // faint grid / texture lines
+  x.save(); x.globalAlpha=0.05; x.strokeStyle='#2a3span'.replace('span','444');
+  x.strokeStyle='#27405a';
+  for(let i=0;i<14;i++){x.beginPath();x.moveTo(0,i*150);x.lineTo(W,i*150);x.stroke();}
+  x.restore();
+}
+function vignette(){
+  const g=x.createRadialGradient(W/2,H/2,H*0.30, W/2,H/2,H*0.72);
+  g.addColorStop(0,'rgba(0,0,0,0)'); g.addColorStop(1,'rgba(0,0,0,0.65)');
+  x.fillStyle=g; x.fillRect(0,0,W,H);
+}
+
+// text helpers
+function setFont(size,weight){x.font=(weight||'700')+' '+size+'px "Helvetica Neue",Arial,sans-serif';}
+function wrap(txt,size,maxW){
+  setFont(size,'700');
+  const words=txt.split(' ');const lines=[];let cur='';
+  for(const w of words){const test=cur?cur+' '+w:w;if(x.measureText(test).width>maxW&&cur){lines.push(cur);cur=w;}else cur=test;}
+  if(cur)lines.push(cur);return lines;
+}
+function caption(txt,size,cy,alpha,color,weight,lh){
+  if(alpha<=0)return;
+  const lines=wrap(txt,size,W-200);
+  lh=lh||size*1.18;
+  x.save();x.globalAlpha=alpha;
+  x.textAlign='center';x.textBaseline='middle';
+  setFont(size,weight||'800');
+  const total=lines.length*lh; let y0=cy-total/2+lh/2;
+  x.fillStyle=color||COL.white;
+  lines.forEach((ln,i)=>{x.fillText(ln,W/2,y0+i*lh);});
+  x.restore();
+}
+// small label pill
+function kicker(txt,cy,alpha,color){
+  if(alpha<=0)return;
+  x.save();x.globalAlpha=alpha;x.textAlign='center';x.textBaseline='middle';
+  setFont(26,'800');
+  const w=x.measureText(txt.toUpperCase()).width;
+  x.fillStyle=(color||COL.blood);
+  x.globalAlpha=alpha*0.18; roundRect(W/2-w/2-26,cy-26,w+52,52,26);x.fill();
+  x.globalAlpha=alpha; x.fillStyle=color||COL.blood;
+  x.fillText(txt.toUpperCase(),W/2,cy+1);
+  x.restore();
+}
+function roundRect(rx,ry,rw,rh,r){x.beginPath();x.moveTo(rx+r,ry);x.arcTo(rx+rw,ry,rx+rw,ry+rh,r);x.arcTo(rx+rw,ry+rh,rx,ry+rh,r);x.arcTo(rx,ry+rh,rx,ry,r);x.arcTo(rx,ry,rx+rw,ry,r);x.closePath();}
+
+// ---------- heartbeat envelope ----------
+// returns 0..1 pulse given time, with bpm timeline (slows + flatlines in liver scene)
+function heartRate(t){
+  // beats per second profile
+  if(t<18) return 1.0;          // 60bpm
+  if(t<23) return lerp(1.0,0.0,(t-23+5)/5); // slowing toward flatline by 23
+  if(t<26.5) return 0.0;        // flatline
+  if(t<29) return lerp(0.0,1.0,(t-26.5)/2.5);
+  return 1.05;
+}
+// integrate phase — precomputed cumulative table for O(1) lookup
+const _PH_STEP=1/120, _PH_N=Math.ceil(70/_PH_STEP);
+const _PHTAB=new Float64Array(_PH_N+1);
+(function(){let p=0;for(let i=0;i<=_PH_N;i++){_PHTAB[i]=p;p+=heartRate(i*_PH_STEP)*_PH_STEP;}})();
+function beatPhase(t){
+  if(t<=0)return 0;
+  const f=t/_PH_STEP; let i=f|0; if(i>=_PH_N)return _PHTAB[_PH_N];
+  return _PHTAB[i]+(_PHTAB[i+1]-_PHTAB[i])*(f-i);
+}
+function beatPulse(t){
+  const p=beatPhase(t);
+  const f=p-Math.floor(p); // 0..1 within beat
+  // lub-dub: two quick contractions
+  function thump(u,c,wd){const d=(u-c)/wd;return Math.exp(-d*d);}
+  let v=thump(f,0.06,0.05)*1.0+thump(f,0.22,0.06)*0.55;
+  return clamp(0,1,v);
+}
+
+// ---------- nation nodes around the heart ----------
+const HEART=(cy)=>({x:W/2,y:cy});
+const NODES=[];
+(function(){
+  const N=7;
+  for(let i=0;i<N;i++){
+    const ang=-Math.PI/2 + i*(Math.PI*2/N) + 0.35;
+    const rad=lerp(360,470,rnd());
+    NODES.push({ang,rad,r:lerp(14,26,rnd()),seed:rnd()});
+  }
+})();
+
+function vesselCtrl(cx,cy,node){
+  const ex=cx+Math.cos(node.ang)*node.rad;
+  const ey=cy+Math.sin(node.ang)*node.rad;
+  const mx=cx+Math.cos(node.ang)*node.rad*0.45 + Math.cos(node.ang+1.4)*70;
+  const my=cy+Math.sin(node.ang)*node.rad*0.45 + Math.sin(node.ang+1.4)*70;
+  return {p0:{x:cx,y:cy},p1:{x:lerp(cx,mx,0.5),y:lerp(cy,my,0.5)},p2:{x:mx,y:my},p3:{x:ex,y:ey}};
+}
+
+// draw an anatomical-ish heart, scale s, glow g (0..1), color override
+function drawHeart(cx,cy,s,glow,dead){
+  x.save();
+  x.translate(cx,cy);x.scale(s,s);
+  const main=dead?'#3a2030':COL.blood;
+  // glow
+  const gg=x.createRadialGradient(0,0,10,0,0,220);
+  const ga=dead?0.04:0.10+glow*0.5;
+  gg.addColorStop(0,COL.bloodGlow+(ga)+')');
+  gg.addColorStop(1,'rgba(255,51,68,0)');
+  x.fillStyle=gg;x.fillRect(-260,-260,520,520);
+  // body of heart (two lobes + point)
+  x.beginPath();
+  x.moveTo(0,-70);
+  x.bezierCurveTo(-95,-160,-230,-70,-120,40);
+  x.bezierCurveTo(-70,100,-15,140,0,175);
+  x.bezierCurveTo(15,140,70,100,120,40);
+  x.bezierCurveTo(230,-70,95,-160,0,-70);
+  x.closePath();
+  const bg2=x.createLinearGradient(0,-160,0,180);
+  bg2.addColorStop(0,dead?'#5a2435':'#ff4f63');
+  bg2.addColorStop(1,dead?'#26121c':COL.bloodDk);
+  x.fillStyle=bg2;x.fill();
+  // inner shading vessels
+  x.globalAlpha=0.5;x.strokeStyle=dead?'#1c0d14':'#ff8a98';x.lineWidth=5;
+  x.beginPath();x.moveTo(-30,-60);x.bezierCurveTo(-10,-20,10,-10,-5,60);x.stroke();
+  x.beginPath();x.moveTo(40,-50);x.bezierCurveTo(30,-10,50,20,20,90);x.stroke();
+  x.globalAlpha=1;
+  // aorta arcs on top
+  x.strokeStyle=dead?'#3a2030':'#ff647a';x.lineWidth=22;x.lineCap='round';
+  x.beginPath();x.moveTo(-20,-120);x.bezierCurveTo(-30,-200,60,-210,55,-130);x.stroke();
+  x.restore();
+}
+
+// ============================================================
+// SCENES
+// ============================================================
+
+function sceneHook(t){
+  const a=seg(t,0,8,1.0,1.0); if(a<=0)return;
+  // claim text typing-in
+  kicker('The claim',300,seg(t,0.3,8,0.8,1.0),COL.mute);
+  const c1=seg(t,0.6,8,1.2,1.0);
+  caption('“Why is America bankrolling',58,470,c1,COL.white,'800');
+  caption('the entire planet —',58,545,seg(t,0.9,8,1.0,1.0),COL.white,'800');
+  caption('while its own people struggle?”',58,620,seg(t,1.2,8,1.0,1.0),COL.white,'800');
+  // big numbers slam in
+  const n1=easeOut((t-2.3)/0.5);
+  if(t>2.3){
+    x.save();x.globalAlpha=seg(t,2.3,8,0.4,1.0);x.textAlign='center';
+    setFont(lerp(160,150,smooth((t-2.3)/0.6)),'900');
+    x.fillStyle=COL.blood;x.textBaseline='middle';
+    x.fillText('$50B',W/2-150,950);
+    x.fillStyle=COL.gold;
+    x.fillText('177',W/2+170,950);
+    setFont(30,'700');x.fillStyle=COL.mute;
+    x.fillText('shipped',W/2-150,1045);x.fillText('countries',W/2+170,1045);
+    x.restore();
+  }
+  // turn line
+  caption('He calls it a bleeding empire.',46,1300,seg(t,4.6,8,1.0,1.0),COL.mute,'600');
+  caption('So let’s look at the body.',54,1380,seg(t,5.4,8,1.0,1.0),COL.white,'800');
+  // hairline pulse at bottom
+  drawPulseLine(t,1620,seg(t,3,8,1,1));
+}
+
+function drawPulseLine(t,cy,a){
+  if(a<=0)return;
+  x.save();x.globalAlpha=a*0.9;x.strokeStyle=COL.blood;x.lineWidth=3;x.beginPath();
+  const span=900,x0=W/2-span/2;
+  for(let i=0;i<=span;i+=4){
+    const px=x0+i; const u=i/span;
+    const beat=beatPulse(t- (1-u)*0.5);
+    const py=cy - beat*60*Math.sin(u*Math.PI*0.999+0.0001>0?1:1);
+    x.lineTo(px,cy-beat*70);
+  }
+  x.stroke();x.restore();
+}
+
+function sceneBody(t){
+  const a=seg(t,8,17.5,1.0,1.0); if(a<=0)return;
+  const cy=820;
+  const pulse=beatPulse(t);
+  const s=lerp(0.92,1.06,smooth(easeOut((t-8)/1.2)))* (1+pulse*0.05);
+  // vessels + blood particles
+  drawVessels(t,W/2,cy,a*easeOut((t-8.4)/1.4),1);
+  drawNodes(t,W/2,cy,a*easeOut((t-8.8)/1.4),false);
+  drawHeart(W/2,cy,s*0.92,pulse,false);
+  // labels
+  kicker('America — the heart',290,seg(t,8.6,17.5,0.8,1.0),COL.blood);
+  caption('An empire isn’t a predator',50,1340,seg(t,10.4,17.5,1.0,1.0),COL.white,'800');
+  caption('standing over a corpse.',50,1405,seg(t,10.8,17.5,1.0,1.0),COL.white,'800');
+  caption('It’s a body. The center feeds the limbs —',44,1520,seg(t,13.2,17.5,1.0,1.0),COL.mute,'600');
+  caption('Rome built the roads it ruled.',44,1575,seg(t,14.0,17.5,1.0,1.0),COL.mute,'600');
+}
+
+function drawVessels(t,cx,cy,a,flow){
+  if(a<=0)return;
+  x.save();x.globalAlpha=a;
+  NODES.forEach((nd,i)=>{
+    const c=vesselCtrl(cx,cy,nd);
+    x.strokeStyle='rgba(255,80,100,0.28)';x.lineWidth=8;x.lineCap='round';
+    x.beginPath();x.moveTo(c.p0.x,c.p0.y);x.bezierCurveTo(c.p1.x,c.p1.y,c.p2.x,c.p2.y,c.p3.x,c.p3.y);x.stroke();
+  });
+  // blood particles traveling outward
+  if(flow>0){
+    NODES.forEach((nd,i)=>{
+      const c=vesselCtrl(cx,cy,nd);
+      for(let k=0;k<5;k++){
+        const ph=((t*0.32*flow)+nd.seed+k*0.2)%1;
+        const p=bez(c.p0,c.p1,c.p2,c.p3,ph);
+        const fade=Math.sin(ph*Math.PI);
+        x.globalAlpha=a*fade*0.9;
+        const rr=lerp(7,3,ph);
+        const g=x.createRadialGradient(p.x,p.y,0,p.x,p.y,rr*3);
+        g.addColorStop(0,'rgba(255,90,110,0.95)');g.addColorStop(1,'rgba(255,51,68,0)');
+        x.fillStyle=g;x.beginPath();x.arc(p.x,p.y,rr*3,0,7);x.fill();
+      }
+    });
+  }
+  x.restore();
+}
+function drawNodes(t,cx,cy,a,starved){
+  if(a<=0)return;
+  x.save();x.globalAlpha=a;
+  NODES.forEach((nd,i)=>{
+    const ex=cx+Math.cos(nd.ang)*nd.rad, ey=cy+Math.sin(nd.ang)*nd.rad;
+    const pulse=beatPulse(t-0.45);
+    const lit=starved?0.12:0.5+pulse*0.5;
+    const g=x.createRadialGradient(ex,ey,0,ex,ey,nd.r*2.4);
+    g.addColorStop(0,`rgba(${starved?'90,100,116':'120,210,200'},${0.5+lit*0.5})`);
+    g.addColorStop(1,'rgba(72,214,200,0)');
+    x.fillStyle=g;x.beginPath();x.arc(ex,ey,nd.r*2.4,0,7);x.fill();
+    x.fillStyle=starved?'#3b4452':COL.oxy;x.globalAlpha=a*(starved?0.5:1);
+    x.beginPath();x.arc(ex,ey,nd.r*0.6,0,7);x.fill();x.globalAlpha=a;
+  });
+  x.restore();
+}
+
+function sceneLiver(t){
+  const a=seg(t,17.5,28.5,1.0,1.2); if(a<=0)return;
+  const cy=820;
+  const dead=heartRate(t)<0.25;
+  const pulse=beatPulse(t);
+  // the body dimming as liver hoards (progress 0..1 over 18.5->24)
+  const hoard=smooth((t-18.8)/4.2);
+  drawVessels(t,W/2,cy,a*(1-hoard*0.85), 1-hoard);
+  drawNodes(t,W/2,cy,a, hoard>0.5);
+  // the liver: one node turns gold and swells, hoarding
+  const liver=NODES[2];
+  const lx=W/2+Math.cos(liver.ang)*liver.rad, ly=cy+Math.sin(liver.ang)*liver.rad;
+  const grow=lerp(1,2.6,hoard);
+  x.save();
+  const gg=x.createRadialGradient(lx,ly,0,lx,ly,60*grow);
+  gg.addColorStop(0,`rgba(244,197,75,${0.25+0.5*hoard})`);gg.addColorStop(1,'rgba(244,197,75,0)');
+  x.fillStyle=gg;x.beginPath();x.arc(lx,ly,60*grow,0,7);x.fill();
+  x.fillStyle=COL.gold;x.globalAlpha=a;
+  x.beginPath();x.arc(lx,ly,16*grow,0,7);x.fill();
+  // gold particles pulled INTO the liver (hoarding)
+  for(let k=0;k<10;k++){
+    const ph=((t*0.5)+k*0.1)%1;
+    const ang=k*0.63+liver.seed*6;
+    const dist=lerp(150,0,ph)*grow*0.4;
+    const px=lx+Math.cos(ang)*dist, py=ly+Math.sin(ang)*dist;
+    x.globalAlpha=a*Math.sin(ph*Math.PI)*hoard;
+    x.fillStyle=COL.gold;x.beginPath();x.arc(px,py,4,0,7);x.fill();
+  }
+  x.restore();
+  // heart slows + dies
+  drawHeart(W/2,cy,0.9*(1+pulse*0.04)*lerp(1,0.9,hoard),pulse,dead&&t>23);
+  // flatline overlay when dead
+  if(t>23&&t<26.6){
+    x.save();x.globalAlpha=seg(t,23,26.6,0.4,0.6)*0.9;x.strokeStyle=COL.dim;x.lineWidth=4;
+    x.beginPath();x.moveTo(140,cy);x.lineTo(W-140,cy);x.stroke();x.restore();
+  }
+  kicker('The selfish liver',290,seg(t,18,28.5,0.8,1.0),COL.gold);
+  caption('A liver that hoards everything',50,1330,seg(t,18.4,23.2,1.0,0.8),COL.white,'800');
+  caption('kills the body.',62,1410,seg(t,19.2,23.2,1.0,0.8),COL.gold,'900');
+  caption('And a dead body',54,1330,seg(t,24.0,28.5,0.8,1.0),COL.white,'800');
+  caption('has a dead liver.',60,1410,seg(t,24.6,28.5,1.0,1.0),COL.blood,'900');
+  caption('Selfishness isn’t strength. It’s suicide.',42,1545,seg(t,26.2,28.5,1.0,1.0),COL.mute,'600');
+}
+
+function sceneFlow(t){
+  const a=seg(t,28.5,39.5,1.0,1.0); if(a<=0)return;
+  kicker('Hemorrhage vs. circulation',280,seg(t,28.7,39.5,0.8,1.0),COL.oxy);
+  const cyA=640, cyB=1080;
+  // LEFT/TOP: hemorrhage — blood drains into void
+  const aH=seg(t,29.2,34.5,1.0,1.0);
+  if(aH>0){
+    caption('HEMORRHAGE',40,cyA-160,aH,COL.blood,'900');
+    caption('blood leaves — and never returns',34,cyA-110,aH,COL.mute,'600');
+    x.save();x.globalAlpha=aH;
+    for(let k=0;k<26;k++){
+      const ph=((t*0.4)+k*0.31)%1;
+      const px=W/2+Math.sin(k*1.7)*260*(1-ph*0.3);
+      const py=cyA-40+ph*230;
+      x.globalAlpha=aH*(1-ph)*0.9;
+      x.fillStyle=COL.blood;x.beginPath();x.arc(px,py,lerp(6,2,ph),0,7);x.fill();
+    }
+    x.restore();
+  }
+  // BOTTOM: circulation — leaves and returns (a loop)
+  const aC=seg(t,33.0,39.5,1.0,1.0);
+  if(aC>0){
+    caption('CIRCULATION',40,cyB+250,aC,COL.oxy,'900');
+    caption('leaves by design — returns carrying oxygen',34,cyB+300,aC,COL.mute,'600');
+    // draw loop ellipse
+    const lcx=W/2,lcy=cyB+60,rx=300,ry=150;
+    x.save();x.globalAlpha=aC;
+    x.strokeStyle='rgba(72,214,200,0.3)';x.lineWidth=6;
+    x.beginPath();x.ellipse(lcx,lcy,rx,ry,0,0,7);x.stroke();
+    for(let k=0;k<16;k++){
+      const ph=((t*0.28)+k/16)%1; const ang=ph*Math.PI*2;
+      const px=lcx+Math.cos(ang)*rx, py=lcy+Math.sin(ang)*ry;
+      // color shifts red->teal as it returns (right half)
+      const ret=Math.sin(ang)>0;
+      x.fillStyle=Math.cos(ang)>0?COL.blood:COL.oxy;
+      x.globalAlpha=aC*0.95;
+      x.beginPath();x.arc(px,py,6,0,7);x.fill();
+    }
+    x.restore();
+  }
+  caption('Money leaving isn’t the wound.',46,1500,seg(t,35.8,39.5,1.0,1.0),COL.white,'800');
+  caption('Stable markets, allies, the dollar — it comes back.',38,1565,seg(t,36.6,39.5,1.0,1.0),COL.mute,'600');
+}
+
+function sceneCard(t){
+  const a=seg(t,39.5,48.5,1.0,1.0); if(a<=0)return;
+  kicker('His best line, turned around',270,seg(t,39.7,48.5,0.8,1.0),COL.gold);
+  const cx=W/2,cy=760;
+  const tilt=Math.sin(t*0.8)*0.04;
+  // credit card
+  x.save();x.translate(cx,cy);x.rotate(tilt);
+  const cw=560,ch=350;
+  roundRect(-cw/2,-ch/2,cw,ch,32);
+  const cg=x.createLinearGradient(-cw/2,-ch/2,cw/2,ch/2);
+  cg.addColorStop(0,'#15324a');cg.addColorStop(1,'#0a1722');
+  x.fillStyle=cg;x.fill();
+  x.strokeStyle='rgba(72,214,200,0.25)';x.lineWidth=2;x.stroke();
+  // chip
+  x.fillStyle=COL.gold;roundRect(-cw/2+44,-ch/2+70,90,66,12);x.fill();
+  x.fillStyle='rgba(255,255,255,0.85)';x.textAlign='left';setFont(40,'800');
+  x.fillText('•••• •••• •••• 1776',-cw/2+44,40);
+  setFont(24,'600');x.fillStyle=COL.mute;
+  x.fillText('THE AMERICAN CONSUMER',-cw/2+44,110);
+  x.restore();
+  // power lines feeding the card from below (the heart/dollar)
+  const aPow=seg(t,42.6,48.5,1.0,1.0);
+  if(aPow>0){
+    x.save();x.globalAlpha=aPow;
+    for(let k=0;k<7;k++){
+      const sx=lerp(cx-220,cx+220,k/6), sy=cy+ch/2-10;
+      for(let j=0;j<3;j++){
+        const ph=((t*0.5)+k*0.13+j*0.33)%1;
+        const py=lerp(1320,sy,ph);
+        x.globalAlpha=aPow*Math.sin(ph*Math.PI);
+        x.fillStyle=COL.gold;x.beginPath();x.arc(sx,py,4,0,7);x.fill();
+      }
+    }
+    x.restore();
+    caption('powered by the system he’s mocking',32,1240,aPow,COL.gold,'700');
+  }
+  caption('That card works because America',46,1430,seg(t,43.4,48.5,1.0,1.0),COL.white,'800');
+  caption('is the heart of the global economy.',46,1492,seg(t,43.9,48.5,1.0,1.0),COL.white,'800');
+  caption('Stop the circulation — and the card stops too.',38,1590,seg(t,45.8,48.5,1.0,1.0),COL.blood,'700');
+}
+
+function sceneProportion(t){
+  const a=seg(t,48.5,55,1.0,1.0); if(a<=0)return;
+  kicker('A drop, not a gush',300,seg(t,48.7,55,0.8,1.0),COL.mute);
+  // big budget bar with a tiny red sliver
+  const bx=160,bw=W-320,by=820,bh=120;
+  const grow=easeOut((t-49.2)/1.2);
+  x.save();x.globalAlpha=a;
+  x.fillStyle='rgba(255,255,255,0.08)';roundRect(bx,by,bw,bh,16);x.fill();
+  x.fillStyle='rgba(120,210,200,0.45)';roundRect(bx,by,bw*grow,bh,16);x.fill();
+  // sliver = 0.7%
+  const sw=bw*0.007;
+  x.fillStyle=COL.blood;x.globalAlpha=a*easeOut((t-50.4)/1.0);
+  roundRect(bx,by-18,Math.max(sw,8),bh+36,4);x.fill();
+  x.restore();
+  caption('Federal budget',30,by-70,seg(t,49.4,55,1,1),COL.mute,'700');
+  // callout
+  caption('$50B sounds like the body bleeding out.',44,1120,seg(t,50.8,55,1.0,1.0),COL.white,'800');
+  x.save();x.globalAlpha=seg(t,52.0,55,0.5,1.0);x.textAlign='center';x.textBaseline='middle';
+  setFont(150,'900');x.fillStyle=COL.blood;x.fillText('≈0.7%',W/2,1320);
+  setFont(34,'700');x.fillStyle=COL.mute;x.fillText('of federal spending. One drop.',W/2,1430);
+  x.restore();
+}
+
+function sceneClose(t){
+  const a=seg(t,55,63,1.0,1.0); if(a<=0)return;
+  const cy=720;
+  const pulse=beatPulse(t);
+  drawVessels(t,W/2,cy,a*0.9,1);
+  drawNodes(t,W/2,cy,a,false);
+  drawHeart(W/2,cy,0.86*(1+pulse*0.05),pulse,false);
+  kicker('The honest close',250,seg(t,55.2,63,0.8,1.0),COL.oxy);
+  caption('A healthy body regulates the flow.',46,1230,seg(t,55.6,63,1.0,1.0),COL.white,'800');
+  caption('It doesn’t stop the heart.',46,1295,seg(t,56.2,63,1.0,1.0),COL.white,'800');
+  caption('Measured. Targeted. Audited.',38,1400,seg(t,57.8,63,1.0,1.0),COL.mute,'700');
+  caption('But circulation isn’t charity —',50,1520,seg(t,59.4,63,1.0,1.0),COL.gold,'800');
+  caption('it’s how the center stays the center.',50,1585,seg(t,60.0,63,1.0,1.0),COL.gold,'800');
+  // final fade vignette handled globally
+}
+
+// ---------- master ----------
+function draw(t){
+  x.clearRect(0,0,W,H);
+  bg(t);
+  sceneHook(t);
+  sceneBody(t);
+  sceneLiver(t);
+  sceneFlow(t);
+  sceneCard(t);
+  sceneProportion(t);
+  sceneClose(t);
+  vignette();
+  // global fade in/out
+  const fin=1-smooth(t/0.6);
+  const fout=smooth((t-62.4)/0.6);
+  const k=Math.max(fin,fout);
+  if(k>0){x.fillStyle='#05070b';x.globalAlpha=k;x.fillRect(0,0,W,H);x.globalAlpha=1;}
+}
+
+window.seekTo=function(t){draw(t);};
+window.DURATION=63;
+draw(0);
+</script>
+</body>
+</html>
